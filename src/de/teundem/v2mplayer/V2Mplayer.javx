@@ -1,0 +1,258 @@
+package de.teundem.v2mplayer;
+
+import static de.teundem.v2m.Main.*;
+
+public class V2Mplayer extends IV2MPlayer {
+
+	@Override
+	public void Init(int a_tickspersec) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public boolean Open(byte ptra_v2mptr, int a_samplerate) {
+		// TODO Auto-generated method stub
+		return false;
+	}
+
+	@Override
+	public void Close() {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void Play(int a_time) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void Stop(int a_fadetime) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void Render(float ptra_buffer, int a_len, boolean a_add) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public boolean IsPlaying() {
+		// TODO Auto-generated method stub
+		return false;
+	}
+
+	@Override
+	public boolean InitBase(int ptra_v2m) {
+		int d = 0;
+		m_base.timediv = v2mBuffer.getInt(d); //System.out.println(m_base.timediv);
+		m_base.timediv2 = 10000*m_base.timediv; //System.out.println(m_base.timediv2);
+		m_base.maxtime = v2mBuffer.getInt(d+4); //System.out.println(m_base.maxtime);
+		m_base.gdnum = v2mBuffer.getInt(d+8); //System.out.println(m_base.gdnum);
+		d += 12;
+		m_base.ptrgptr = d; //System.out.println(m_base.ptrgptr);
+		d += 10 * m_base.gdnum; //System.out.println("d:" + Integer.toHexString(0x0042c000 + d));
+		//System.out.println("--------");
+		for(int ch=0; ch < 16; ch++) {
+			//int ch=0;
+			V2MBase.Channel c = m_base.chan[ch];
+			c.notenum = v2mBuffer.getInt(d);
+			//System.out.println(c.notenum);
+			d += 4;
+			if(c.notenum > 0) {
+				c.ptrnoteptr = d; //System.out.println(Integer.toHexString(d));
+				d += 5 * c.notenum;
+				c.pcnum = v2mBuffer.getInt(d); //System.out.println(c.pcnum);
+				d += 4;
+				c.ptrpcptr = d; //System.out.println(Integer.toHexString(0x0042c000+c.ptrpcptr));
+				d += 4 * c.pcnum;
+				c.pbnum = v2mBuffer.getInt(d); //System.out.println(c.pbnum);
+				d += 4;
+				c.ptrpbptr = d; //System.out.println(Integer.toHexString(0x0042c000+c.ptrpbptr));
+				d += 5 * c.pbnum;
+				for(int cn = 0; cn < 7; cn++) {
+					//int cn = 0;
+					V2MBase.Channel.CC cc = c.ctl[cn];
+					cc.ccnum = v2mBuffer.getInt(d); //System.out.println(cc.ccnum);
+					d += 4;
+					cc.ptrccptr = d; //System.out.println(Integer.toHexString(0x0042c000+cc.ptrccptr));
+					d += 4 * cc.ccnum;
+					//System.out.println("d:" + Integer.toHexString(0x0042c000+d));
+				}
+			}
+		}
+		//System.out.println("d:" + Integer.toHexString(0x0042c000+d));
+		int size = v2mBuffer.getInt(d); //System.out.println(size);
+		if(size > 16384 || size < 0) return false;
+		d += 4; 
+		m_base.ptrglobals = d; //System.out.println("d:" + Integer.toHexString(0x0042c000+d));
+		d += size;
+		size = v2mBuffer.getInt(d); //System.out.println("d:" + Integer.toHexString(0x0042c000+d));
+		if(size > 1048576 || size < 0) return false;
+		d += 4;
+		m_base.ptrpatchmap = d; //System.out.println("d:" + Integer.toHexString(0x0042c000+d));
+		d += size;
+		
+		int spsize = v2mBuffer.getInt(d); //System.out.println("d:" + Integer.toHexString(0x0042c000+d));
+		d += 4;
+		if(spsize == 0 || spsize >=8192) {
+			/*for(int i = 0; i < 256; i++) {
+				m_base.ptrspeechptrs[i] = " ";
+			}*/
+		} else {
+			m_base.ptrspeechdata = d;
+			d += spsize;
+		}
+		return false;
+	}
+
+	//#define GETDELTA(p, w) ((p)[0]+((p)[w]<<8)+((p)[2*w]<<16))
+	//#define UPDATENT(n, v, p, w) if ((n)<(w)) { (v)=m_state.time+GETDELTA((p), (w)); if ((v)<m_state.nexttime) m_state.nexttime=(v); }
+	//#define UPDATENT2(n, v, p, w) if ((n)<(w) && GETDELTA((p), (w))) { (v)=m_state.time+GETDELTA((p), (w)); }
+	//#define UPDATENT3(n, v, p, w) if ((n)<(w) && (v)<m_state.nexttime) m_state.nexttime=(v); 
+	//#define PUTSTAT(s) { sU8 bla=(s); if (laststat!=bla) { laststat=bla; *mptr++=(sU8)laststat; }};
+
+	/*public void GETDELTA(int p, int w) {
+		((p)[0]+((p)[w]<<8)+((p)[2*w]<<16))
+	}*/
+	
+	/*public void UPDATENT(int n, int v, int p, int w) {
+		if ((n)<(w)) { (v)=m_state.time+GETDELTA((p), (w)); if ((v)<m_state.nexttime) m_state.nexttime=(v); }
+	}*/
+	
+	@Override
+	public void Reset() {
+		System.out.println("RESET");
+		m_state.time = 0;
+		m_state.nexttime = 0x0fffffff; //-1;
+		m_state.ptrgptr = m_base.ptrgptr;
+		m_state.gnr = 0;
+		/* UPDATENT(m_state.gnr, m_state.gnt, m_state.ptrgptr, m_base.gdnum); */
+		if (m_state.gnr < m_base.gdnum) {
+			//m_state.gnt=m_state.time+(m_state.ptrgptr[0]+(m_state.ptrgptr[m_base.gdnum]<<8)+(m_state.ptrgptr[2*m_base.gdnum]<<16));
+			//if (m_state.gnt < m_state.nexttime) m_state.nexttime = m_state.gnt;
+			m_state.gnt=m_state.time+(v2mBuffer.get(m_state.ptrgptr+0)+(v2mBuffer.get(m_state.ptrgptr+m_base.gdnum)<<8)+(v2mBuffer.get(m_state.ptrgptr+(2*m_base.gdnum))<<16));
+			if (m_state.gnt < m_state.nexttime) {
+				m_state.nexttime = m_state.gnt;
+			}
+			
+			//int p = m_state.ptrgptr;
+			//int g = m_base.gdnum;
+			//byte a = v2mBuffer.get(b);
+			//byte b = 0;
+			//byte c = 0;
+			//System.out.println(v2mBuffer.get(p));
+			//System.out.println(v2mBuffer.get(p+(v2mBuffer.get(g)*4)));
+			//System.out.println(v2mBuffer.get(p+(v2mBuffer.get(2*g)*4)));
+		}
+		/* UPDATENT(m_state.gnr, m_state.gnt, m_state.ptrgptr, m_base.gdnum); */
+		for(int ch = 0; ch < 16; ch++) {
+			//V2MBase.Channel bc = m_base.chan[ch];
+			//PlayerState.Channel sc = m_state.chan[ch];
+			
+			if(m_base.chan[ch].notenum == 0) continue; //if(bc.notenum == 0) continue;
+			//sc.ptrnoteptr = bc.ptrnoteptr;
+			//sc.notenr = sc.lastnte = sc.lastvel = 0;
+			//udatent
+			/*if ((sc.notenr)<(bc.notenum)) {
+				(sc.notent)=m_state.time+(((sc.ptrnoteptr))[0]+(((sc.ptrnoteptr))[(bc.notenum)]<<8)+(((sc.ptrnoteptr))[2*(bc.notenum)]<<16));
+				if ((sc.notent)<m_state.nexttime) {
+					m_state.nexttime=(sc.notent);
+				}
+			}*/
+			/*if ((sc.notenr)<(bc.notenum)) {
+				(sc.notent)=m_state.time+(v2mBuffer.get(sc.ptrnoteptr+0)+(v2mBuffer.get(sc.ptrnoteptr+bc.notenum)<<8)+(v2mBuffer.get(sc.ptrnoteptr+(2*bc.notenum))<<16));
+				if ((sc.notent)<m_state.nexttime) {
+					m_state.nexttime=(sc.notent);
+				}
+			}
+			//updatent
+			sc.ptrpcptr = bc.ptrpcptr;
+			sc.pcnr = sc.lastpc = 0;
+			//updatent
+			/*if ((sc.pcnr)<(bc.pcnum)) {
+				(sc.pcnt)=m_state.time+(((sc.ptrpcptr))[0]+(((sc.ptrpcptr))[(bc.pcnum)]<<8)+(((sc.ptrpcptr))[2*(bc.pcnum)]<<16));
+				if ((sc.pcnt)<m_state.nexttime) {
+					m_state.nexttime=(sc.pcnt);
+				}
+			}*/
+			/*if ((sc.pcnr)<(bc.pcnum)) {
+				(sc.pcnt)=m_state.time+(v2mBuffer.get(sc.ptrpcptr+0)+(v2mBuffer.get(sc.ptrpcptr+bc.pcnum)<<8)+(v2mBuffer.get(sc.ptrpcptr+(2*bc.pcnum))<<16));
+				if ((sc.pcnt)<m_state.nexttime) {
+					m_state.nexttime=(sc.pcnt);
+				}
+			}
+			//updatent
+			sc.ptrpbptr = bc.ptrpbptr;
+			sc.pbnr = sc.lastpb0 = sc.lastpb1 = 0;
+			//updatent
+			/*if ((sc.pbnr)<(bc.pcnum)) {
+				(sc.pbnt)=m_state.time+(((sc.ptrpbptr))[0]+(((sc.ptrpbptr))[(bc.pcnum)]<<8)+(((sc.ptrpbptr))[2*(bc.pcnum)]<<16));
+				if ((sc.pbnt)<m_state.nexttime) {
+					m_state.nexttime=(sc.pbnt);
+				}
+			}*/
+			/*if ((sc.pbnr)<(bc.pcnum)) {
+				(sc.pbnt)=m_state.time+(v2mBuffer.get(sc.ptrpbptr+0)+(v2mBuffer.get(sc.ptrpbptr+bc.pcnum)<<8)+(v2mBuffer.get(sc.ptrpbptr+(2*bc.pcnum))<<16));
+				if ((sc.pbnt)<m_state.nexttime) {
+					m_state.nexttime=(sc.pbnt);
+				}
+			}
+
+			//updatent
+			for(int cn = 0; cn < 7; cn++) {
+				V2MBase.Channel.CC bcc = bc.ctl[cn];
+				PlayerState.Channel.CC scc = sc.ctl[cn];
+				scc.ptrccptr = bcc.ptrccptr;
+				scc.ccnr = scc.lastcc = 0;
+				//updatent
+				/*if ((scc.ccnr)<(bcc.ccnum)) {
+					(scc.ccnt)=m_state.time+(((scc.ptrccptr))[0]+(((scc.ptrccptr))[(bcc.ccnum)]<<8)+(((scc.ptrccptr))[2*(bcc.ccnum)]<<16));
+					if ((scc.ccnt)<m_state.nexttime) {
+						m_state.nexttime=(scc.ccnt);
+					}
+				}*/
+				/*if ((scc.ccnr)<(bcc.ccnum)) {
+					(scc.ccnt)=m_state.time+(v2mBuffer.get(scc.ptrccptr+0)+(v2mBuffer.get(scc.ptrccptr+bcc.ccnum)<<8)+(v2mBuffer.get(scc.ptrccptr+(2*bcc.ccnum))<<16));
+					if ((scc.ccnt)<m_state.nexttime) {
+						m_state.nexttime=(scc.ccnt);
+					}
+				}*/
+				//updatent
+			//}
+		}
+
+		m_state.usecs = 5000 * m_samplerate;
+		m_state.num = 4;
+		m_state.den = 4;
+		m_state.tpq = 8;
+		m_state.bar = 0;
+		m_state.beat = 0;
+		m_state.tick = 0;
+		m_state.smplrem = 0;
+		
+		if(m_samplerate > 0) {
+			//synthInit(m_synth, m_base.ptrpatchmap, m_samplerate);
+			//synthSetGlobals();
+			//synthSetLyrics();
+		}
+	}
+
+	@Override
+	public void Tick() {
+		// TODO Auto-generated method stub
+
+	}
+
+	public static void main(String[] args) {
+		readV2M();
+		V2Mplayer player = new V2Mplayer();
+		boolean b = player.InitBase(0);
+		if(b == true) System.out.println("InitBase Success");
+		player.Reset();
+	}
+}

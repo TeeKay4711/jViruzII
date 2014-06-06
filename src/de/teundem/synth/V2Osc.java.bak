@@ -1,0 +1,353 @@
+package de.teundem.synth;
+
+import static de.teundem.synth.Utils.*;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
+
+class syVOsc {
+	//float mode;
+	float mode;
+	float ring;
+	float pitch;
+	float detune;
+	float color;
+	float gain;
+}
+
+public class V2Osc {
+
+	private final int OSC_OFF = 0;
+	private final int OSC_TRI_SAW = 1;
+	private final int OSC_PULSE = 2;
+	private final int OSC_SIN = 3;
+	private final int OSC_NOISE = 4;
+	private final int OSC_FM_SIN = 5;
+	private final int OSC_AUXA = 6;
+	private final int OSC_AUXB = 7;
+
+	private final int OSMTC_DOWN = 0;
+	private final int OSMTC_UP_DOWN = 2;
+	private final int OSMTC_UP = 3;
+	private final int OSMTC_DOWN_UP_DOWN = 4;
+	private final int OSMTC_DOWN_UP = 5;
+	private final int OSMTC_UP_DOWN_UP = 7;
+	
+	/*public static enum Mode {
+		OSC_OFF,
+		OSC_TRI_SAW,
+		OSC_PULSE,
+		OSC_SIN,
+		OSC_NOISE,
+		OSC_FM_SIN,
+		OSC_AUXA,
+		OSC_AUXB
+	};*/
+	int mode;
+	boolean ring;
+	//int cnt;
+	long cnt;
+	int freq;
+	//int brpt;
+	long brpt;
+	float nffrq, nfres;
+	long nseed;
+	float gain;
+	V2LRC nf = new V2LRC();
+	float note;
+	float pitch;
+	
+	/* Debug stuff start */
+	
+	/*static boolean d_opened = false;
+	static int d_count = 0;
+	static boolean d_logged = false;
+	static FileWriter writer;
+	static PrintWriter print;*/
+	
+	/* Debug stuff end */
+
+	V2Instance inst;
+	
+	public void init(V2Instance instance, int idx) {
+		final long seeds[] = {0xdeadbeefl, 0xbaadf00dl, 0xd3adc0del};
+		//assert(idx < COUNTOF(seeds));
+		
+		cnt = 0;
+		nf.init();
+		nseed = seeds[idx];
+		inst = instance;
+	}
+	
+	public void noteOn() {
+		chgPitch();
+	}
+	
+	public void chgPitch() {
+		nffrq = inst.SRfclinfreq * calcfreq((pitch + 64.0f) / 128.0f);
+		freq = (int)(inst.SRfcobasefrq * Math.pow(2.0f, (pitch + note - 60.0f)/ 12.0f));
+	}
+	
+	public void set(syVOsc para) {
+		mode = (int)para.mode;
+		ring = ((int)(para.ring) & 1) !=0;
+		
+		pitch = (para.pitch - 64.0f) + (para.detune - 64.0f) / 128.0f;
+		chgPitch();
+		gain = para.gain / 128.0f;
+		
+		float col = para.color / 128.0f;
+		brpt = ftou32(col);
+		nfres = (float) (1.0f - Math.sqrt(col));
+		
+		/* Debug writer START */
+
+		/*try {
+		if(!d_logged) {
+			if(d_count < 1000)
+			{
+				if(!d_opened){
+					//openFile
+					writer = new FileWriter("DebugJ.txt");
+					print = new PrintWriter(writer);
+					d_opened = true;
+				} else {
+					d_count++;
+					int t = (ring) ? 1 : 0;
+
+					print.printf("%d mode %d ring %d pitch %f gain %f col %f brpt %d nfres %f\n", d_count, mode, t, pitch, gain, col, brpt, nfres);
+				}
+			} else {
+				print.close();
+				System.out.println("Closed");
+				d_logged = true;
+			}
+		}
+		} catch (IOException e){
+			System.out.println("DebugOutputError");
+		}*/
+
+		//int t = (ring) ? 1 : 0;
+		//System.out.printf("%d mode %d ring %d pitch %f gain %f col %f brpt %d nfres %f\n", d_count, mode, t, pitch, gain, col, brpt, nfres);
+
+		/* Debug writer END */
+
+	}
+	
+	public void render(float[] dest, int nsamples) {
+		//Mode mode = Mode.OSC_OFF;
+		
+		switch (mode & 7) {
+		case OSC_OFF: break;
+		case OSC_TRI_SAW: renderTriSaw(dest, nsamples); break;
+		case OSC_PULSE: renderPulse(dest, nsamples); break;
+		case OSC_SIN: renderSin(dest, nsamples); break;
+		case OSC_NOISE: renderNoise(dest, nsamples); break;
+		case OSC_FM_SIN: renderFMSin(dest, nsamples); break;
+		//case OSC_AUXA: renderAux(dest, inst.auxabuf, nsamples); break;
+		//case OSC_AUXB: renderAux(dest, inst.auxbbuf, nsamples); break;
+		case OSC_AUXA: renderAux(dest, inst.auxabuf, nsamples); break;
+		case OSC_AUXB: renderAux(dest, inst.auxbbuf, nsamples); break;
+		}
+
+		/*switch (mode) {
+		case 0: break;
+		case 1: renderTriSaw(dest, nsamples); break;
+		case 2: renderPulse(dest, nsamples); break;
+		case 3: renderSin(dest, nsamples); break;
+		case 4: renderNoise(dest, nsamples); break;
+		case 5: renderFMSin(dest, nsamples); break;
+		case 6: renderAux(dest, inst.auxabuf, nsamples); break;
+		case 7: renderAux(dest, inst.auxbbuf, nsamples); break;
+		}*/
+	}
+
+	private void output(float[] dest,int i , float x) {
+		if(ring) {
+			dest[i] *= x;
+		} else {
+			dest[i] += x;
+		}
+	}
+	
+	/*public static enum OSMTransitionCode {
+		OSMTC_DOWN(0),         // old=down, new=down, no carry
+		// 1 is an invalid configuration
+		OSMTC_UP_DOWN(2),      // old=up, new=down, no carry
+		OSMTC_UP(4),           // old=up, new=up, no carry
+		OSMTC_DOWN_UP_DOWN(4), // old=down, new=down, carry
+		OSMTC_DOWN_UP(5),      // old=down, new=up, carry
+		// 6 is an invalid configuration
+		OSMTC_UP_DOWN_UP(7);    // old=up, new=up, carry
+		
+		public final int code;
+		
+		OSMTransitionCode(int code) {
+			this.code = code;
+		}
+	};*/
+	
+	public int osm_init() {
+		long t1;
+		t1 = (cnt - freq) & 0xffffffffl;
+		//return (cnt - freq) < brpt ? 3 : 0;
+		return (t1 < brpt) ? 3 : 0;
+	}
+	
+	public int osm_tick(long state) {
+		state = ((state << 1) | ((cnt < brpt) ? 1 : 0)) & 3;
+		
+		int transition_code = (int) (state | (cnt < (int)freq ? 4 : 0));
+		cnt += freq;
+		
+		return transition_code;
+	}
+
+	private void renderTriSaw(float[] dest, int nsamples) {
+		float f = utof23(freq);
+		float omf = 1.0f - f;
+		float rcpf = 1.0f / f;
+		float col = utof23(brpt);
+		
+		float c1 = gain / col;
+		float c2 = -gain / (1.0f - col);
+		
+		int state = osm_init();
+		
+		for(int i = 0; i < nsamples; i++) {
+			float p = utof23(cnt) - col;
+			float y = 0.0f;
+			
+			switch (osm_tick(state)) {
+			case OSMTC_UP:
+				y = c1 * (p + p - f);
+				break;
+			case OSMTC_DOWN:
+				y = c2 * (p + p - f);
+				break;
+			case OSMTC_UP_DOWN:
+				y = rcpf * (c2 * sqr(p) - c1 * sqr(p-f));
+				break;
+			case OSMTC_DOWN_UP:
+				y = -rcpf * (gain + c2 * sqr(p + omf) - c1 * sqr(p));
+				break;
+			case OSMTC_UP_DOWN_UP:
+				y = -rcpf * (gain + c1 * omf * (p + p + omf));
+				break;
+			case OSMTC_DOWN_UP_DOWN:
+				y = -rcpf * (gain + c2 * omf * (p + p + omf));
+				break;
+			default:
+				assert(false);
+				break;
+			}
+			output(dest, i, y + gain);
+		}
+	}
+	
+	private void renderPulse(float[] dest, int nsamples) {
+		float f = utof23(freq);
+		float gdf = gain / f;
+		float col = utof23(brpt);
+		
+		float cc121 = gdf * 2.0f * (col - 1.0f) + gain;
+		float cc212 = gdf * 2.0f * (col - gain);
+		
+		int state = osm_init();
+		
+		for(int i = 0; i < nsamples; i++) {
+			float p = utof23(cnt);
+			float out = 0.0f;
+			
+			switch(osm_tick(state)) {
+				case OSMTC_UP:
+					out = gain;
+					break;
+					
+				case OSMTC_DOWN:
+					out = -gain;
+					break;
+					
+				case OSMTC_UP_DOWN:
+					out = gdf * 2.0f * (col - p) + gain;
+					break;
+					
+				case OSMTC_DOWN_UP:
+					out = gdf * 2.0f * p - gain;
+					break;
+					
+				case OSMTC_UP_DOWN_UP:
+					out = cc121;
+					break;
+					
+				case OSMTC_DOWN_UP_DOWN:
+					out = cc212;
+					
+				default:
+					break;
+			}
+			
+			output(dest, i, out);
+		}
+	}
+
+	private void renderSin(float[] dest, int nsamples) {
+		for(int i = 0; i < nsamples; i++) {
+			int phase = (int) (cnt + 0x40000000);
+			cnt += freq;
+			
+			if((phase & 0x80000000) != 0) {
+				phase = ~phase;
+			}
+			
+			float t = Utils.bits2float((phase >> 8) | 0x3f800000);
+			
+			t = t * fcpi - fc1p5pi;
+			
+			output(dest, i, gain * fastsin(t));
+		}
+	}
+	
+	private void renderNoise(float[] dest, int nsamples) {
+		V2LRC flt = nf;
+		long seed = nseed;
+		
+		for(int i = 0; i < nsamples; i++) {
+			float n = frandom(seed);
+			float h = flt.step(n, nffrq, nfres);
+			float x = nfres * (flt.l + h) + flt.b;
+			
+			output(dest, i, gain * x);
+		}
+		
+		flt = nf;
+		nseed = seed;
+	}
+
+	private void renderFMSin(float dest[], int nsamples) {
+		for(int i = 0; i < nsamples; i++) {
+			float mod = dest[i] * fcfmmax;
+			float t = (utof23(cnt) + mod) * fc2pi;
+			cnt += freq;
+			
+			float out = gain * fastsinrc(t);
+			if(ring) {
+				dest[i] *= out;
+			} else {
+				dest[i] = out;
+			}
+		}
+	}
+
+	private void renderAux(float dest[], float[][] src, int nsamples) {
+		float g = gain * fcgain;
+		for(int i = 0; i < nsamples; i++) {
+			float aux = g * (src[i][0] + src[i][0]);
+			if(ring) {
+				aux *= dest[i];
+			}
+			dest[i] = aux;
+		}
+	}
+}

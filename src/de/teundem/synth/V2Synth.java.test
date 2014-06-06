@@ -1,0 +1,572 @@
+	class V2Synth {
+		static final int POLY = 64;
+		static final int CHANS = 16;
+
+		V2PatchMap patchmap;
+		int mrstat; // running status in MIDI decoding
+		long curalloc;
+		int samplerate;
+		int[] chanmap = new int[POLY]; // voice . chan
+		long[] allocpos = new long[POLY];
+		int[] voicemap = new int[CHANS]; // chan . choice
+		int tickd; // number of finished samples left in mix buffer
+
+		V2ChanInfo[] chans = new V2ChanInfo[CHANS];
+		syVV2[] voicesv = new syVV2[POLY];
+		V2Voice[] voicesw = new V2Voice[POLY];
+		syVChan[] chansv = new syVChan[CHANS];
+		V2Chan[] chansw = new V2Chan[CHANS];
+
+		class Globals {
+			syVReverb rvbparm;
+			syVModDel delparm;
+			float vlowcut;
+			float vhighcut;
+			syVComp cprparm;
+			short guicolor;
+			byte[] _pad = new byte[3];
+		} //globals;
+
+		V2Reverb reverb;
+		V2ModDel delay;
+		V2DCFilter dcf;
+		V2Comp compr;
+		float lcfreq; // low cut freq
+		float[] lcbuf = new float[2]; // low cut buf l/r
+		float hcfreq; // high cut freq
+		float[] hcbuf = new float[2]; // high cut buf l/r
+
+		boolean initialized;
+
+		// delay buffers
+		float[][] maindelbuf = new float[2][32768];
+		float[][][] chandelbuf = new float[CHANS][2][2048];
+
+		V2Instance instance;
+
+		//syWRonan ronan;
+
+		void init(V2PatchMap patchmap, int samplerate) {
+			// Ahem, so this is somewhat dubious, but we don't use
+			// virtual functions or anything so it should be fine. Ahem.
+			// Look away please :)
+			//memset(this, 0, sizeof(this));
+
+			// set sampling rate
+			this.samplerate = samplerate;
+			instance.calcNewSampleRate(samplerate);
+			//ronanCBSetSR(ronan, samplerate);
+
+			// patch map
+			this.patchmap = (V2PatchMap) patchmap;
+
+			// init voices
+			for (int i = 0; i < POLY; i++) {
+				chanmap[i] = -1;
+				voicesw[i].init(instance);
+			}
+
+			// init channels
+			for (int i = 0; i < CHANS; i++) {
+				chans[i].ctl[6] = 0x7f;
+				//chansw[i].init(instance, chandelbuf[i][0], chandelbuf[i][1], COUNTOF(chandelbuf[i][0]));
+				chansw[i].init(instance, chandelbuf[i][0], chandelbuf[i][1], chandelbuf[i][0].length);
+			}
+
+			// global filters
+			reverb.init(instance);
+			//delay.init(instance, maindelbuf[0], maindelbuf[1], COUNTOF(maindelbuf[0]));
+			delay.init(instance, maindelbuf[0], maindelbuf[1], maindelbuf[0].length);
+			//ronanCBInit(ronan);
+			compr.init(instance);
+			dcf.init(instance);
+
+			// debug plots (uncomment the ones you want)
+			int sr_plot = 44100 / 10; // plot rate
+			int sr_lfo = 800;
+			int w = 800, h = 150;
+
+			initialized = true;
+		}
+
+		void render(float[] buf, int nsamples, float buf2[], boolean add) {
+			int todo = nsamples;
+
+			// fragment loop - chunk everything into frames.
+			while (todo != 0) {
+				// do we need to render a new frame?
+				if (tickd == 0)
+					tick();
+
+				// copy to dest buffer(s)
+				StereoSample[] src = instance.mixbuf[instance.SRcFrameSize - tickd];
+				int nread = Math.min(todo, tickd);
+				if (buf2 != null) // interleaved samples
+				{
+					if (!add) {
+						//COVER("OUT interleaved set");
+						//memcpy(buf, src, nread * sizeof(StereoSample));
+					} else {
+						//COVER("OUT interleaved add");
+						for (int i = 0; i < nread; i++) {
+							buf[i * 2 + 0] += src[i].l;
+							buf[i * 2 + 1] += src[i].r;
+						}
+					}
+
+					buf += 2 * nread;
+				} else // buf = left, buf2 = right
+				{
+					if (!add) {
+						//COVER("OUT separate set");
+						for (int i = 0; i < nread; i++) {
+							buf[i] = src[i].l;
+							buf2[i] = src[i].r;
+						}
+					} else {
+						//COVER("OUT separate add");
+						for (int i = 0; i < nread; i++) {
+							buf[i] += src[i].l;
+							buf2[i] += src[i].r;
+						}
+					}
+
+					buf += nread;
+					buf2 += nread;
+				}
+
+				todo -= nread;
+				tickd -= nread;
+			}
+
+			//DEBUG_PLOT_UPDATE();
+		}
+
+		void processMIDI(short cmd) {
+			while (cmd != 0xfd) // until end of stream
+			{
+				if ((cmd & 0x80) != 0) // start of message
+					mrstat = cmd++;
+
+				if (mrstat < 0x80) // we don't have a current message? uhm...
+					break;
+
+				int chan = mrstat & 0xf;
+				switch ((mrstat >> 4) & 7) {
+					case 1: // Note on
+						if (cmd[1] != 0) // velocity==0 is actually a note off
+						{
+							//COVER("MIDI note on");
+							if (chan == CHANS - 1)
+								//ronanCBNoteOn(ronan);
+
+							// calculate current polyphony for this channel
+							V2Sound sound = getpatch(chans[chan].pgm);
+							int npoly = 0;
+							for (int i = 0; i < POLY; i++)
+								npoly += ((chanmap[i] == chan) ? 1 : 0);
+
+							// voice allocation. this is equivalent to the original V2 code,
+							// but hopefully simpler to follow.
+							int usevoice = -1;
+							int chanmask, chanfind;
+
+							if ((npoly == 0) || npoly < sound.maxpoly) // even if maxpoly is 0, allow at least 1.
+							{
+								// if we haven't reached polyphony limit yet, try to find a free voice
+								// first.
+								for (int i = 0; i < POLY; i++) {
+									if (chanmap[i] < 0) {
+										usevoice = i;
+										break;
+									}
+								}
+
+								// okay, need to find a free voice. we'll take any channel.
+								//COVER("SYN find voice any");
+								chanmask = 0;
+								chanfind = 0;
+							} else {
+								// if we're at polyphony limit, we know there's at least one voice
+								// used by this channel, so we can limit ourselves to killing
+								// voices from our own chan.
+								//COVER("SYN find voice channel");
+								chanmask = 0xf;
+								chanfind = chan;
+							}
+
+							// don't have a voice yet? kill oldest eligible one with gate off.
+							if (usevoice < 0) {
+								//COVER("SYN replace voice gate off");
+								long oldest = curalloc;
+								for (int i = 0; i < POLY; i++) {
+									if ((chanmap[i] & chanmask) == chanfind && !voicesw[i].gate && allocpos[i] < oldest) {
+										oldest = allocpos[i];
+										usevoice = i;
+									}
+								}
+							}
+
+							// still no voice? okay, just take the oldest one we can find, period.
+							if (usevoice < 0) {
+								//COVER("SYN replace voice oldest");
+								long oldest = curalloc;
+								for (int i = 0; i < POLY; i++) {
+									if ((chanmap[i] & chanmask) == chanfind && allocpos[i] < oldest) {
+										oldest = allocpos[i];
+										usevoice = i;
+									}
+								}
+							}
+
+							// we have our voice - assign it!
+							assert (usevoice >= 0);
+							chanmap[usevoice] = chan;
+							voicemap[chan] = usevoice;
+							allocpos[usevoice] = curalloc++;
+
+							// and note on!
+							storeV2Values(usevoice);
+							voicesw[usevoice].noteOn(cmd[0], cmd[1]);
+							cmd += 2;
+							break;
+						}
+						// fall-through (for when we had a note off)
+
+					case 0: // Note off
+						//COVER("MIDI note off");
+						if (chan == CHANS - 1)
+							//ronanCBNoteOff(&ronan);
+
+							for (int i = 0; i < POLY; i++) {
+								if (chanmap[i] != chan)
+									continue;
+
+								V2Voice voice = voicesw[i];
+								if (voice.note == cmd[0] && voice.gate)
+									voice.noteOff();
+							}
+						cmd += 2;
+						break;
+
+					case 2: // Aftertouch
+						//COVER("MIDI aftertouch");
+						cmd++; // ignored
+						break;
+
+					case 3: // Control change
+						//COVER("MIDI controller change");
+					{
+						int ctrl = cmd[0];
+						short val = cmd[1];
+						if (ctrl >= 1 && ctrl <= 7) {
+							chans[chan].ctl[ctrl - 1] = val;
+							if (chan == CHANS - 1) {
+							}
+							//ronanCBSetCtl(&ronan, ctrl, val);
+						} else if (ctrl == 120) // CC #120: all sound off
+						{
+							//COVER("MIDI CC all sound off");
+							for (int i = 0; i < POLY; i++) {
+								if (chanmap[i] != chan)
+									continue;
+
+								voicesw[i].init(instance);
+								chanmap[i] = -1;
+							}
+						} else if (ctrl == 123) // CC #123: all notes off
+						{
+							//COVER("MIDI CC all notes off");
+							if (chan == CHANS - 1)
+								//ronanCBNoteOff(ronan);
+
+								for (int i = 0; i < POLY; i++) {
+									if (chanmap[i] == chan)
+										voicesw[i].noteOff();
+								}
+						}
+					}
+						cmd += 2;
+						break;
+
+					case 4: // Program change
+						//COVER("MIDI program change");
+					{
+						short pgm = cmd++ & 0x7f;
+						// did the program actually change?
+						if (chans[chan].pgm != pgm) {
+							//COVER("MIDI program change real");
+							chans[chan].pgm = pgm;
+
+							// need to turn all voices on this channel off.
+							for (int i = 0; i < POLY; i++) {
+								if (chanmap[i] == chan)
+									chanmap[i] = -1;
+							}
+						}
+
+						// either way, reset controllers
+						for (int i = 0; i < 6; i++)
+							chans[chan].ctl[i] = 0;
+					}
+						break;
+
+					case 5: // Pitch bend
+						//COVER("MIDI pitch bend");
+						cmd += 2; // ignored
+						break;
+
+					case 6: // Poly Aftertouch
+						//COVER("MIDI poly aftertouch");
+						cmd += 2; // ignored
+						break;
+
+					case 7: // System
+						//COVER("MIDI system exclusive");
+						if (chan == 0xf) // Reset
+							init(patchmap, samplerate);
+						break; // rest ignored
+				}
+			}
+		}
+
+		void setGlobals(short para)
+  {
+    if (!initialized)
+      return;
+
+    // copy over
+    float globf = (float)globals;
+    for (int i=0; i < sizeof(globals)/sizeof(float); i++)
+      globf[i] = para[i];
+
+    // set
+    reverb.set(globals.rvbparm);
+    delay.set(globals.delparm);
+    compr.set(globals.cprparm);
+    lcfreq = sqr((globals.vlowcut + 1.0f) / 128.0f);
+    hcfreq = sqr((globals.vhighcut + 1.0f) / 128.0f);
+  }
+
+		void getPoly(int[] dest) {
+			for (int i = 0; i <= CHANS; i++)
+				dest[i] = 0;
+
+			for (int i = 0; i < POLY; i++) {
+				int chan = chanmap[i];
+				if (chan < 0)
+					continue;
+
+				dest[chan]++;
+				dest[CHANS]++;
+			}
+		}
+
+		void getPgm(int[] dest) {
+			for (int i = 0; i < CHANS; i++)
+				dest[i] = chans[i].pgm;
+		}
+
+		V2Sound getpatch(int pgm) {
+			assert (pgm >= 0 && pgm < 128);
+			return null; //(V2Sound) patchmap.raw_data[patchmap.offsets[pgm]];
+		}
+
+		float getmodsource(V2Voice voice, int chan, int source) {
+			float in = 0.0f;
+
+			switch (source) {
+				case 0: // velocity
+					//COVER("MOD src vel");
+					in = voice.velo;
+					break;
+
+				case 1:
+				case 2:
+				case 3:
+				case 4:
+				case 5:
+				case 6:
+				case 7: // controller value
+					//COVER("MOD src ctl");
+					in = chans[chan].ctl[source - 1];
+					break;
+
+				case 8:
+				case 9: // EG output
+					//COVER("MOD src EG");
+					in = voice.env[source - 8].out;
+					break;
+
+				case 10:
+				case 11: // LFO output
+					//COVER("MOD src LFO");
+					in = voice.lfo[source - 10].out;
+					break;
+
+				default: // note
+					//COVER("MOD src note");
+					in = 2.0f * (voice.note - 48.0f);
+					break;
+			}
+
+			return in;
+		}
+
+		void storeV2Values(int vind) {
+			assert (vind >= 0 && vind < POLY);
+			int chan = chanmap[vind];
+			if (chan < 0)
+				return;
+
+			// get patch definition
+			V2Sound patch = getpatch(chans[chan].pgm);
+
+			// voice data
+			syVV2 vpara = voicesv[vind];
+			//XXX:float vparaf = (float) vpara;
+			V2Voice voice = voicesw[vind];
+
+			// copy voice dependent data
+			for (int i = 0; i < COUNTOF(patch.voice); i++)
+				vparaf[i] = (float) patch.voice[i];
+
+			// modulation matrix
+			for (int i = 0; i < patch.modnum; i++) {
+				V2Mod mod = patch.modmatrix[i];
+				if (mod.dest >= COUNTOF(patch.voice))
+					continue;
+
+				float scale = (mod.val - 64.0f) / 64.0f;
+				vparaf[mod.dest] = clamp(vparaf[mod.dest] + scale * getmodsource(voice, chan, mod.source), 0.0f, 128.0f);
+			}
+
+			voice.set(vpara);
+		}
+
+		void storeChanValues(int chan) {
+			assert (chan >= 0 && chan < CHANS);
+
+			// get patch definition
+			V2Sound patch = getpatch(chans[chan].pgm);
+
+			// chan data
+			syVChan cpara = chansv[chan];
+			//XXX:float cparaf = (float) cpara;
+			V2Chan cwork = chansw[chan];
+			V2Voice voice = voicesw[voicemap[chan]];
+
+			// copy channel dependent data
+			for (int i = 0; i < COUNTOF(patch.chan); i++)
+				cparaf[i] = (float) patch.chan[i];
+
+			// modulation matrix
+			for (int i = 0; i < patch.modnum; i++) {
+				V2Mod mod = patch.modmatrix[i];
+				int dest = mod.dest - COUNTOF(patch.voice);
+				if (dest < 0 || dest >= COUNTOF(patch.chan))
+					continue;
+
+				float scale = (mod.val - 64.0f) / 64.0f;
+				cparaf[dest] = clamp(cparaf[dest] + scale * getmodsource(voice, chan, mod.source), 0.0f, 128.0f);
+			}
+
+			cwork.set(cpara);
+		}
+
+		void tick() {
+			// voices
+			for (int i = 0; i < POLY; i++) {
+				if (chanmap[i] < 0)
+					continue;
+
+				storeV2Values(i);
+				voicesw[i].tick();
+
+				// if EG1 finished, turn off voice
+				if (voicesw[i].env[0].state == V2Env.OFF)
+					chanmap[i] = -1;
+			}
+
+			// chans
+			for (int i = 0; i < CHANS; i++)
+				storeChanValues(i);
+
+			//ronanCBTick(&ronan);
+			tickd = instance.SRcFrameSize;
+			renderFrame();
+
+		}
+
+		void renderFrame() {
+			int nsamples = instance.SRcFrameSize;
+
+			// clear output buffer
+			//memset(instance.mixbuf, 0, nsamples * sizeof(StereoSample));
+
+			// clear aux buffers
+			//memset(instance.aux1buf, 0, nsamples * sizeof(float));
+			//memset(instance.aux2buf, 0, nsamples * sizeof(float));
+			//memset(instance.auxabuf, 0, nsamples * sizeof(StereoSample));
+			//memset(instance.auxbbuf, 0, nsamples * sizeof(StereoSample));
+
+			// process all channels
+			for (int chan = 0; chan < CHANS; chan++) {
+				// check if any voices are active on this channel
+				int voice = 0;
+				while (voice < POLY && chanmap[voice] != chan)
+					voice++;
+
+				if (voice == POLY)
+					continue;
+
+				// clear channel buffer
+				//memset(instance.chanbuf, 0, nsamples * sizeof(StereoSample));
+
+				// render all voices on this channel
+				for (; voice < POLY; voice++) {
+					if (chanmap[voice] != chan)
+						continue;
+
+					voicesw[voice].render(instance.chanbuf, nsamples);
+				}
+
+				// channel 15 . Ronan
+				if (chan == CHANS - 1) {
+				}
+				//ronanCBProcess(&ronan, &instance.chanbuf[0].l, nsamples);
+
+				chansw[chan].process(nsamples);
+			}
+
+			// global filters
+			StereoSample[] mix = instance.mixbuf;
+			reverb.render(mix, nsamples);
+			delay.renderAux2Main(mix, nsamples);
+			dcf.renderStereo(mix, mix, nsamples);
+
+			// low cut/high cut
+			float lcf = lcfreq, hcf = hcfreq;
+			for (int i = 0; i < nsamples; i++) {
+				for (int ch = 0; ch < 2; ch++) {
+					// low cut
+					float x = mix[i].ch[ch] - lcbuf[ch];
+					lcbuf[ch] += lcf * x;
+
+					// high cut
+					if (hcf != 1.0f) {
+						hcbuf[ch] += hcf * (x - hcbuf[ch]);
+						x = hcbuf[ch];
+					}
+
+					mix[i].ch[ch] = x;
+				}
+			}
+
+			// sum compressor
+			compr.render(mix, nsamples);
+
+			//DEBUG_PLOT_STEREO(mix, mix, nsamples);
+		}
+	};
+}

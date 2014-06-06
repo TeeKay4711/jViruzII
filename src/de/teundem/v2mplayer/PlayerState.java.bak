@@ -1,0 +1,46 @@
+package de.teundem.v2mplayer;
+
+public class PlayerState {
+	public enum state {OFF, STOPPED, PLAYING};
+	public static int time;
+	public static int nexttime;
+	public static int ptrgptr;
+	public static int gnt;
+	public static int gnr;
+	public static int usecs;
+	public static int num;
+	public static int den;
+	public static int tpq;
+	public static int bar;
+	public static int beat;
+	public static int tick;
+	public static class Channel {
+		public /*final*/ static int ptrnoteptr;
+		public static int notenr;
+		public static int notent;
+		public static byte lastnte;
+		public static byte lastvel;
+		public /*final*/ static int ptrpcptr;
+		public static int pcnr;
+		public static int pcnt;
+		public static byte lastpc;
+		public /*final*/ static int ptrpbptr;
+		public static int pbnr;
+		public static int pbnt;
+		public static byte lastpb0;
+		public static byte lastpb1;
+		public static class CC {
+			public /*final*/ static int ptrccptr;
+			public static int ccnt;
+			public static int ccnr;
+			public static byte lastcc;
+		}
+		public static CC[] ctl = new CC[7];
+	}
+	public static Channel[] chan = new Channel[16];
+	//public static Channel.CC[] ctl = new Channel.CC[7];
+	public static int cursmpl;
+	public static int smpldelta;
+	public static int smplrem;
+	public static int tdif;
+}

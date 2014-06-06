@@ -1,0 +1,201 @@
+package de.teundem.synth;
+
+public class V2Comp implements Constants {
+	public static final int COMPDLEN = 5700;
+	public static final int RMSLEN = 8192;
+
+	/*public static enum Mode {
+		MODE_OFF,
+		MODE_PEAK,
+		MODE_RMS
+	};*/
+	private final int MODE_OFF = 0;
+	private final int MODE_PEAK = 1;
+	private final int MODE_RMS = 2;
+
+	/*public static enum ModeBits {
+		MODE_BIT_MASK,
+		MODE_BIT_RMS,
+		MODE_BIT_MONO,
+		MODE_BIT_STEREO,
+		MODE_BIT_ON,
+		MODE_BIT_OFF
+	};*/
+
+	private final int MODE_BIT_PEAK = 0;
+	private final int MODE_BIT_RMS = 1;
+	private final int MODE_BIT_MONO = 0;
+	private final int MODE_BIT_STEREO = 2;
+	private final int MODE_BIT_ON = 0;
+	private final int MODE_BIT_OFF = 4;
+
+	int mode;
+
+	float invol;
+	float ratio;
+	float outvol;
+	float attack;
+	float release;
+
+	long dblen;
+	long dbcnt;
+
+	float curgain[] = new float[2];
+	float peakval[] = new float[2];
+	float rmsval[] = new float[2];
+	long rmscnt;
+
+	//StereoSample dbuf[] = new StereoSample[COMPDLEN];
+	//StereoSample rmsbuf[] = new StereoSample[RMSLEN];
+	float[][] dbuf = new float[COMPDLEN][2];
+	float[][] rmsbuf = new float[RMSLEN][2];
+
+	V2Instance inst;
+
+	public void init(V2Instance instance) {
+		mode = MODE_BIT_STEREO;
+		//memset(dbuf, 0, sizeof(dbuf)); // dbuf-size = 45600
+		inst = instance;
+
+		reset();
+
+	}
+
+	void reset() {
+
+		for (int i = 0; i < 2; i++) {
+			peakval[i] = 0.0f;
+			rmsval[i] = 0.0f;
+			curgain[i] = 1.0f;
+		}
+		for(int i = 0; i < rmsbuf.length; i++) {
+			rmsbuf[i][0] = 0.0f;
+			rmsbuf[i][1] = 0.0f;
+		}
+		//memset(rmsbuf, 0, sizeof(rmsbuf)); //rmsbuf size = 65536
+		rmscnt = 0;
+	}
+
+	void set(syVComp para) {
+		int oldmode = mode;
+		switch ((int) para.mode) {
+			case MODE_OFF:
+				mode = MODE_BIT_OFF;
+				break;
+			case MODE_PEAK:
+				mode = MODE_BIT_PEAK | MODE_BIT_ON;
+				break;
+			case MODE_RMS:
+				mode = MODE_BIT_RMS | MODE_BIT_ON;
+				break;
+			default:
+		}
+
+		if (para.stereo != 0.0f) {
+			mode = mode | MODE_BIT_STEREO;
+		}
+
+		if (mode != oldmode) {
+			reset();
+		}
+
+		dblen = (int)(para.lookahead * inst.SRfcsamplesperms);
+
+		float thresh = 8.0f * Utils.calcfreq(para.threshold / 128.0f);
+		invol = 1.0f / thresh;
+		if (para.autogain != 0.0f) {
+			thresh = 1.0f;
+		}
+		outvol = (float) (thresh * Math.pow(2.0f, (para.outgain - 64.0f) / 16.0f));
+		ratio = para.ratio / 128.0f;
+
+		attack = (float) Math.pow(2.0f, -para.attack * 12.0f / 128.0f);
+		release = (float) Math.pow(2.0f, -para.release * 16.0f / 128.0f);
+		
+		//System.out.printf("%f %f %f %f %f %f %f %f %f\n", para.mode, para.stereo, para.autogain, para.lookahead, para.threshold, para.ratio, para.attack, para.release, para.outgain);
+	}
+
+	//void render(StereoSample[] buf, int nsamples) {
+	void render(float[][] buf, int nsamples) {
+		assert dblen >= 0 && dblen <= 0xffffffffl : "dblen "+dblen;
+		assert dbcnt >= 0 && dbcnt <= 0xffffffffl : "dbcnt "+dbcnt;
+		assert rmscnt >= 0 && rmscnt <= 0xffffffffl : "rmscnt "+rmscnt;
+		
+		if ((mode & MODE_BIT_OFF) != 0) {
+			return;
+		}
+
+		//StereoSample[] levels = inst.levelbuf;
+		float[][] levels = inst.levelbuf;
+		switch (mode & (MODE_BIT_RMS | MODE_BIT_STEREO)) {
+			
+			case MODE_BIT_PEAK | MODE_BIT_MONO:
+				for (int i = 0; i < nsamples; i++) {
+					levels[i][0] = levels[i][1] = invol * doPeak(0.5f * (buf[i][0] + buf[i][1]), 0);
+				}
+				break;
+			
+			case MODE_BIT_RMS | MODE_BIT_MONO:
+				for (int i = 0; i < nsamples; i++) {
+					levels[i][0] = levels[i][1] = invol * doRMS(0.5f * (buf[i][0] + buf[i][1]), 0);
+					rmscnt = (rmscnt + 1) & (RMSLEN - 1);
+				}
+				break;
+			
+			case MODE_BIT_PEAK | MODE_BIT_STEREO:
+				for (int i = 0; i < nsamples; i++) {
+					levels[i][0] = invol * doPeak(buf[i][0], 0);
+					levels[i][1] = invol * doPeak(buf[i][1], 1);
+				}
+				break;
+			
+			case MODE_BIT_RMS | MODE_BIT_STEREO:
+				for (int i = 0; i < nsamples; i++) {
+					levels[i][0] = invol * doRMS(buf[i][0], 0);
+					levels[i][1] = invol * doRMS(buf[i][1], 1);
+					rmscnt = (rmscnt + 1) & (RMSLEN - 1);
+					System.out.println(rmscnt);
+				}
+				break;
+		}
+
+		for (int ch = 0; ch < 2; ch++) {
+			float gain = curgain[ch];
+			long dbind = dbcnt;
+
+			for (int i = 0; i < nsamples; i++) {
+				float v = outvol * dbuf[(int)dbind][ch];
+				dbuf[(int) dbind][ch] = invol * buf[i][ch];
+				if (++dbind >= dblen) {
+					dbind = 0;
+				}
+
+				float dgain = 1.0f;
+				float lvl = levels[i][ch];
+				if (lvl >= 1.0f) {
+					dgain = 1.0f / (1.0f + ratio * (lvl - 1.0f));
+				}
+
+				gain += (dgain < gain ? attack : release) * (dgain - gain);
+				buf[i][ch] = v * gain;
+			}
+
+			curgain[ch] = gain;
+			if (ch == 1) {
+				dbcnt = dbind;
+			}
+		}
+	}
+
+	float doPeak(float in, int ch) {
+		peakval[ch] = Utils.max(peakval[ch] * fccpdfalloff + fcdcoffset, Math.abs(in));
+		return peakval[ch];
+	}
+
+	float doRMS(float in, int ch) {
+		float insq = Utils.sqr(in + fcdcoffset);
+		rmsval[ch] += insq - rmsbuf[(int) rmscnt][ch];
+		rmsbuf[(int) rmscnt][ch] = insq;
+		return (float) Math.sqrt(rmsval[ch] / (float) RMSLEN);
+	}
+}

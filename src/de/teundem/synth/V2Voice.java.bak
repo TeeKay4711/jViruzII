@@ -1,0 +1,251 @@
+package de.teundem.synth;
+
+import java.io.DataOutputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+
+public class V2Voice implements Constants {
+
+	/*public static enum FilterRouting {
+		FLTR_SINGLE,
+		FLTR_SERIAL,
+		FLTR_PARALLEL
+	};*/
+
+	private final int FLTR_SINGLE = 0;
+	private final int FLTR_SERIAL = 1;
+	private final int FLTR_PARALLEL = 2;
+
+	/*public static enum KeySync {
+		SYNC_NONE,
+		SYNC_OSC,
+		SYNC_FULL
+	};*/
+	private final int SYNC_NONE = 0;
+	private final int SYNC_OSC = 1;
+	private final int SYNC_FULL = 2;
+	
+	int note;
+	float velo;
+	boolean gate;
+	
+	float curvol;
+	float volramp;
+	
+	float xpose;
+	int fmode;
+	float lvol;
+	float rvol;
+	float f1gain;
+	float f2gain;
+	
+	int keysync;
+	
+	V2Osc osc[] = new V2Osc[syVV2.NOSC];
+	V2Flt vcf[] = new V2Flt[syVV2.NFLT];
+	V2Env env[] = new V2Env[syVV2.NENV];
+	V2LFO lfo[] = new V2LFO[syVV2.NLFO];
+	V2Dist dist = new V2Dist();
+	V2DCFilter dcf = new V2DCFilter();
+	
+	V2Instance inst;
+	
+	public void init(V2Instance instance) {
+		for(int i = 0; i < syVV2.NOSC; i++) {
+			osc[i] = new V2Osc();
+			osc[i].init(instance, i);
+		}
+		for(int i = 0; i < syVV2.NFLT; i++) {
+			vcf[i] = new V2Flt();
+			vcf[i].init(instance);
+		}
+		for(int i = 0; i < syVV2.NENV; i++) {
+			env[i] = new V2Env();
+			env[i].init(instance);
+		}
+		for(int i = 0; i < syVV2.NLFO; i++) {
+			lfo[i] = new V2LFO();
+			lfo[i].init(instance);
+		}
+		dist.init(instance);
+		dcf.init(instance);
+		inst = instance;
+	}
+	
+	void tick() {
+		for(int i = 0; i < syVV2.NENV; i++) {
+			env[i].tick(gate);
+		}
+		
+		for(int i = 0; i < syVV2.NLFO; i++) {
+			lfo[i].tick();
+		}
+		
+		volramp = (env[0].out / 128.0f - curvol) * inst.SRfclinfreq;
+	}
+	
+	//void render(StereoSample[] dest, int nsamples) {
+	void render(float[][] dest, int nsamples) {
+		
+		// clear voice buffer
+		float[] voice = inst.vcebuf;
+		float[] voice2 = inst.vcebuf2;
+		// memset(voice, 0, nsamples * sizeof(*voice));
+		for(int i = 0; i < nsamples; i++) {
+			voice[i] = 0.0f;
+			voice2[i] = 0.0f;
+		}
+		// oscillators -> voice buffer
+		for(int i = 0; i < syVV2.NOSC; i++) {
+			osc[i].render(voice, nsamples);
+		}
+
+		try {
+			FileOutputStream fos = new FileOutputStream("test.raw", true);
+			DataOutputStream dos = new DataOutputStream(fos);
+
+			for (int i = 0; i < nsamples; i++) {
+				dos.writeFloat(voice[i]);
+			}
+			dos.close();
+
+		} catch (IOException e) {
+
+		}
+
+		// voice buffer -> filters -> voice buffer
+		switch(fmode) {
+			case FLTR_SINGLE:
+				vcf[0].render(voice, voice, nsamples);
+				break;
+			case FLTR_SERIAL:
+				vcf[0].render(voice, voice, nsamples);
+				vcf[1].render(voice, voice, nsamples);
+				break;
+			case FLTR_PARALLEL:
+				vcf[1].render(voice2, voice, nsamples);
+				vcf[0].render(voice, voice, nsamples);
+				for(int i = 0; i < nsamples; i++) {
+					voice[i] = voice[i] * f1gain + voice2[i] * f2gain;
+				}
+				break;
+		}
+		
+		// voice buffer -> distortion -> voicebuffer
+		dist.renderMono(voice, voice, nsamples);
+		
+		// voice buffer -> dc filter -> voice buffer
+		dcf.renderMono(voice, voice, nsamples);
+		
+		// voicebuffer (mono) += output buffer (stereo)
+		// original ASM code has chan buffers hardwired as output here
+		float cv = curvol;
+		for(int i = 0; i < nsamples; i++) {
+			float out = voice[i] * cv;
+			cv += volramp;
+			
+			//dest[i].l += lvol * out + fcdcoffset;
+			//dest[i].r += rvol * out + fcdcoffset;
+			dest[i][0] += lvol * out + fcdcoffset;
+			dest[i][1] += rvol * out + fcdcoffset;
+		}
+		curvol = cv;
+	}
+	
+	void set(syVV2 para) {
+		xpose = para.transp - 64.0f;
+		updateNote();
+		
+		fmode = (int)para.routing;
+		keysync = (int)para.oscsync;
+		float p = para.panning / 128.0f;
+		lvol = (float) Math.sqrt(1.0f - p);
+		rvol = (float) Math.sqrt(p);
+		
+		float x = (para.ftlbal - 64.0f) / 64.0f;
+		if(x >= 0.0f) {
+			f2gain = 1.0f;
+			f1gain = 1.0f - x;
+		} else {
+			f1gain = 1.0f;
+			f2gain = 1.0f + x;
+		}
+		
+		for(int i = 0; i < syVV2.NOSC; i++) {
+			osc[i].set(para.osc[i]);
+		}
+		
+		for(int i = 0; i < syVV2.NENV; i++) {
+			env[i].set(para.env[i]);
+		}
+		
+		for(int i = 0; i < syVV2.NFLT; i++) {
+			vcf[i].set(para.flt[i]);
+		}
+		
+		for(int i = 0; i < syVV2.NLFO; i++) {
+			lfo[i].set(para.lfo[i]);
+		}
+		
+		dist.set(para.dist);
+	}
+	
+	void noteOn(int note, int vel) {
+		this.note = note;
+		updateNote();
+		
+		velo = (float)vel;
+		gate = true;
+		
+		for(int i = 0; i < syVV2.NENV; i++) {
+			env[i].state = V2Env.ATTACK;
+		}
+		
+		switch(keysync) {
+			case SYNC_FULL:
+				for(int i = 0; i < syVV2.NENV; i++) {
+					env[i].val = 0.0f;
+				}
+				curvol = 0.0f;
+				
+				for(int i = 0; i < syVV2.NOSC; i++) {
+					osc[i].init(inst, i);
+				}
+				
+				for(int i = 0; i < syVV2.NFLT; i++) {
+					vcf[i].init(inst);
+				}
+				
+				dist.init(inst);
+				
+			case SYNC_OSC:
+				for(int i = 0; i < syVV2.NOSC; i++) {
+					osc[i].cnt = 0;
+				}
+			case SYNC_NONE:
+			default:
+				break;
+		}
+		
+		for(int i = 0; i < syVV2.NOSC; i++) {
+			osc[i].chgPitch();
+		}
+		
+		for(int i = 0; i < syVV2.NLFO; i++) {
+			lfo[i].keyOn();
+		}
+		
+		dcf.init(inst);
+	}
+	
+	void noteOff() {
+		gate = false;
+	}
+	
+	void updateNote() {
+		float n = xpose + (float)note;
+		for(int i = 0; i < syVV2.NOSC; i++) {
+			osc[i].note = n;
+		}
+	}
+}

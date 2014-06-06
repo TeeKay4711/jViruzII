@@ -1,0 +1,13 @@
+package de.teundem.synth;
+
+public class StereoSample {
+
+	static float[] ch = new float[2];
+
+	static float l;
+	static float r;
+
+	//static float[] left = new float[280];
+	//static float[] right = new float[280];
+
+}

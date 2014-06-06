@@ -1,0 +1,6 @@
+package de.teundem.v2mplayer;
+
+public class CC {
+	public static int ccnum;
+	public /*final*/ static int ptrccptr;
+}

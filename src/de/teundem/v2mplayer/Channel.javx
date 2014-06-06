@@ -1,0 +1,10 @@
+package de.teundem.v2mplayer;
+
+public class Channel {
+	public static int notenum;
+	public /*final*/ static int ptrnoteptr;
+	public static int pcnum;
+	public /*final*/ static int ptrpcptr;
+	public static int pbnum;
+	public /*final*/ static int ptrpbptr;
+}
